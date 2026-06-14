@@ -4,7 +4,7 @@ I needed this while creating big assembly here: https://youtu.be/Pww76NPr6M8?si=
 
 Please do not forget to change UI file location!!! 
 
-Writer: Dr.Mucibirahman İLBUĞA
+Writer: Dr. Mucibirahman İLBUĞA
 
 Email: mucip.ilbuga@gmail.com
 
