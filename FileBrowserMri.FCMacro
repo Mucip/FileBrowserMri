@@ -1,0 +1,435 @@
+# This macro written incase of find and see the part or assembly files more easily.
+# I needed this while creating big assembly here: https://youtu.be/Pww76NPr6M8?si=cOHvuqOpyoPSeXO2
+# Please do not forget to change UI file location!!! 
+# Writer: Dr.Mucibirahman İLBUĞA
+# Email: mucip.ilbuga@gmail.com
+# Web: https://www.mucipilbuga.com/
+# June 2026
+
+
+
+import os
+import time
+from PySide6 import QtWidgets, QtUiTools, QtCore, QtGui
+import FreeCAD
+import FreeCADGui as Gui
+from FreeCAD import Console
+from os import path
+import zipfile
+
+
+#Please update below UI file location acording to your own UI file location. 
+UI_PATH = "/home/mucip/.local/share/FreeCAD/v1-1/Mod/mri/mainwindow.ui"
+OBJ_NAME = "MriFileBrowser"
+
+class KlasorSeciciArayuz(QtCore.QObject):
+    def __init__(self):
+        
+        super().__init__()
+        
+        # 1. Mevcut pencereyi temizle
+        mw = Gui.getMainWindow()
+        eski = mw.findChild(QtWidgets.QWidget, OBJ_NAME)
+        if eski:
+            eski.close()
+            eski.deleteLater()
+
+        # 2. UI Yükle
+        if not path.exists(UI_PATH):
+            print("Dosya bulunamadı!")
+            return
+
+        loader = QtUiTools.QUiLoader()
+        ui_file = QtCore.QFile(UI_PATH)
+        ui_file.open(QtCore.QFile.ReadOnly)
+        self.window = loader.load(ui_file)
+        ui_file.close()
+
+        # 3. Pencere Ayarları
+        self.window.setObjectName(OBJ_NAME)
+        self.window.setParent(mw)
+        self.window.setWindowFlags(QtCore.Qt.Tool)
+        
+        self.olusturulan_kutu = None
+        self.secim_modu_aktif = False 
+        
+        try:
+            Gui.Selection.removeObserver(self)
+        except:
+            pass    
+        
+        Gui.Selection.addObserver(self)
+        self._is_deleted = False
+        
+        # --- HAFIZADAN ESKİ YOLU OKUMA ---
+        # FreeCAD'in "User parameter" (Kullanıcı Tercihleri) altından kendi makromuz için bir dal açıyoruz
+        self.param_grubu = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Macros/MriKlasorSecici")
+        
+        # Hafızada daha önce kaydedilmiş bir yol var mı diye bakıyoruz (Yoksa boş metin döner)
+        eski_yol = self.param_grubu.GetString("SonKlasorYolu", "")
+        
+        # Eğer eski bir yol varsa ve diskte hala mevcutsa kutuya yaz ve otomatik listele
+        if eski_yol and os.path.exists(eski_yol):
+            self.window.lEKlasor.setText(eski_yol)
+            # İsteğe bağlı: Makro açılır açılmaz klasörü otomatik listelemek istersen:
+            #self.klasor_listele()
+
+        # --- İLİŞKİLENDİRME BURADA BAŞLIYOR ---
+        
+        # Buton Bağlantıları
+        self.window.pBKlasorSec.clicked.connect(self.klasor_sec)
+        self.window.pBTazele.clicked.connect(self.klasor_listele) # Tazele butonu bağlandı
+        
+        # Tablo Model Tanımlaması (QTableView için model oluşturuyoruz)
+        self.tablo_model = QtGui.QStandardItemModel()
+        self.tablo_model.setHorizontalHeaderLabels(["Dosya Adı", "Boyut", "Oluşturma Tarihi", "Değiştirme Tarihi"])
+        self.window.tableViewListe.setModel(self.tablo_model)
+        
+        # Tablo sütunlarının genişliğini otomatik içeriğe göre ayarla
+        self.window.tableViewListe.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        # Tablodaki satır değişimlerini (hem fare hem ok tuşları) yakalamak için seçim modeline bağlanıyoruz
+        self.window.tableViewListe.selectionModel().currentChanged.connect(self.satir_degisti)
+        
+        # Tablo satırına çift tıklandığında tetiklenecek sinyal
+        self.window.tableViewListe.doubleClicked.connect(self.dosya_ac)
+        #Enter ile açılıyor.
+        self.window.tableViewListe.installEventFilter(self)
+        
+        # Tablo sütunlarının genişliğini otomatik içeriğe göre ayarla
+        self.window.tableViewListe.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.window.tableViewListe.selectionModel().currentChanged.connect(self.satir_degisti)
+        
+        # --- SIRALAMA ÖZELLİĞİ BURADA BAŞLIYOR ---
+        # Tablonun sütun başlıklarına tıklayarak sıralama yapmayı aktif ediyoruz
+        self.window.tableViewListe.setSortingEnabled(True)
+        
+        # İlk listelemede varsayılan olarak 0. sütuna (Dosya Adı) göre A'dan Z'ye sıralı gelsin
+        self.window.tableViewListe.sortByColumn(0, QtCore.Qt.AscendingOrder)
+        # --- SIRALAMA ÖZELLİĞİ BİTTİ ---      
+        
+        
+        
+        
+        # İkonları butonlara ata
+        self.window.radioParca.setText("")
+        self.window.radioMontaj.setText("")
+        self.window.radioHepsi.setText("Both")
+        
+        ikon_parca = Gui.getIcon("PartDesign_Body")      # Katı parça gövde ikonu
+        ikon_montaj = Gui.getIcon("Geoassembly.svg")   # Yeni Montaj tezgahı ikonu (Veya "Std_Link")
+        #ikon_hepsi = Gui.getIcon("Part_document.svg")             # Genel döküman ikonu
+        
+        # Butonlara ata
+        self.window.radioParca.setIcon(ikon_parca)
+        self.window.radioMontaj.setIcon(ikon_montaj)
+        #self.window.radioHepsi.setIcon(ikon_hepsi)
+        
+        # --- İLİŞKİLENDİRME SONU ---
+        
+        # 5. Pencere Boyutları ve Konumlandırma
+        genislik = 800
+        yukseklik = 400
+        self.window.resize(genislik, yukseklik)
+
+        ana_geometri = mw.geometry()
+        x = ana_geometri.width() - genislik - 5  
+        y = ana_geometri.height() - yukseklik - 80 
+        
+        self.window.move(ana_geometri.x() + x, ana_geometri.y() + y)
+        self.window.show()
+        
+    def klasor_sec(self):
+        secilen_klasor = QtWidgets.QFileDialog.getExistingDirectory(
+            self.window, 
+            "Bir Klasör Seçin",
+            os.path.expanduser("~/Documents/FreeCAD"), 
+            QtWidgets.QFileDialog.ShowDirsOnly | QtWidgets.QFileDialog.DontResolveSymlinks
+        )
+        
+        if secilen_klasor:
+            self.window.lEKlasor.setText(secilen_klasor)
+            Console.PrintMessage(f"Seçilen Klasör: {secilen_klasor}\n")
+            # Klasör seçildiği an otomatik listelemek istersen alt satırı aktif edebilirsin:
+            # self.klasor_listele()
+            # --- GÜNCEL YOLU HAFIZAYA KAYDET ---
+            # Kullanıcı her yeni klasör seçtiğinde bu bilgi FreeCAD ayarlarına yazılır
+            self.param_grubu.SetString("SonKlasorYolu", secilen_klasor)
+
+    
+    def is_assembly_file(self, file_path):
+        try:
+            with zipfile.ZipFile(file_path, 'r') as archive:
+                # Belge yapısını içeren XML dosyasını oku
+                if 'Document.xml' in archive.namelist():
+                    xml_content = archive.read('Document.xml').decode('utf-8')
+                    
+                    # Popüler montaj tezgahlarının isimlerini kontrol et
+                    assembly_keywords = ['Assembly', 'A2plus', 'Assembly3', 'Assembly4']
+                    
+                    for keyword in assembly_keywords:
+                        if keyword in xml_content:
+                            return True, f"Montaj (Tespit edilen: {keyword})"
+                            
+            return False, "Tekil Parça / Diğer"
+        except Exception as e:
+            return False, f"Hata: {str(e)}"
+            
+            
+    def analiz_et_freecad_dosyasi(self, file_path):
+        try:
+            # Garanti yöntem: Kütüphaneyi doğrudan fonksiyonun içinde import ediyoruz
+            import xml.etree.ElementTree as ET
+            import zipfile
+            
+            with zipfile.ZipFile(file_path, 'r') as archive:
+                if 'Document.xml' not in archive.namelist():
+                    return "Geçersiz Dosya"
+    
+                xml_data = archive.read('Document.xml')
+                root = ET.fromstring(xml_data)
+                
+                objeler = root.findall(".//Object")
+                
+                link_sayisi = 0
+                grup_sayisi = 0
+                montajBulundu = False
+                
+                for obj in objeler:
+                    obj_type = obj.get('type')
+                    
+                    if(montajBulundu == False): #Sadece bir kere bakması yeter. Tüm alt montajlara kasmasın bence.                       
+                    
+                        if obj_type in ['App::Link', 'App::LinkGroup']:
+                            link_sayisi += 1
+                            montajBulundu = True
+                        elif obj_type in [ 'Assembly::Assembly', 'Assembly::Joint', 'Assembly::AsmPart']: #'App::Part',  Parçalar da görünüyor yoksa?
+                            grup_sayisi += 1
+    
+                if link_sayisi > 0 or grup_sayisi > 0:
+                    return "Montaj",  f"Montaj ({link_sayisi} Link, {grup_sayisi} Öge)"
+                else:
+                    return "Parca", "Tekil Parça"
+    
+        except Exception as e:
+            return "Hata", f"Hata: {str(e)}"
+            
+            
+    def satir_degisti(self, current, previous):
+        """ Hem fare tıklamasında hem de ok tuşlarıyla hareket edildiğinde tetiklenir """
+        # Seçili satırın indeksini al
+        row = current.row()
+        if row < 0:
+            return
+            
+        # 0. sütundaki (Dosya Adı) veriyi al
+        dosya_adi_item = self.tablo_model.item(row, 0)
+        if not dosya_adi_item:
+            return
+            
+        dosya_adi = dosya_adi_item.text()
+        klasor_yolu = self.window.lEKlasor.text()
+        tam_yol = os.path.join(klasor_yolu, dosya_adi)
+        
+        # Önizleme resmini yükle ve QLabel'de göster
+        self.onizleme_goster(tam_yol)
+        
+        
+
+    def dosya_ac(self, index):
+        """ Tablodaki bir satıra çift tıklandığında ilgili FreeCAD dosyasını açar """
+        try:
+            # Tıklanan satırın indeksini alıyoruz
+            row = index.row()
+            if row < 0:
+                return
+                
+            # 0. sütundaki (Dosya Adı) veriyi al
+            dosya_adi_item = self.tablo_model.item(row, 0)
+            if not dosya_adi_item:
+                return
+                
+            dosya_adi = dosya_adi_item.text()
+            klasor_yolu = self.window.lEKlasor.text()
+            tam_yol = os.path.join(klasor_yolu, dosya_adi)
+            
+            print (f"Açılacak: {tam_yol}")
+            
+            # Dosyanın varlığını kontrol et ve FreeCAD içinde aç
+            if os.path.exists(tam_yol):
+                Console.PrintMessage(f"Dosya açılıyor: {dosya_adi}\n")
+                #Gui.open(tam_yol)
+                #FreeCADGui.open(tam_yol)
+                FreeCAD.openDocument(tam_yol)
+            else:
+                QtWidgets.QMessageBox.warning(self.window, "Hata", "Dosya bulunamadı!")
+                
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self.window, "Hata", f"Dosya açılırken bir hata oluştu:\n{str(e)}") 
+            
+            
+                           
+    def eventFilter(self, source, event):
+        """ Tablo üzerindeki klavye hareketlerini yakalar """
+        # Olayın bir tuşa basma eylemi olup olmadığını ve tablodan gelip gelmediğini kontrol et
+        if event.type() == QtCore.QEvent.KeyPress and source is self.window.tableViewListe:
+            # Hem normal Enter hem de Numpad'deki Enter tuşunu kontrol et
+            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                # Şu an tabloda seçili olan satırın indeksini al
+                current_index = self.window.tableViewListe.currentIndex()
+                if current_index.isValid():
+                    # Mevcut dosya_ac fonksiyonumuzu bu indeksle tetikle
+                    self.dosya_ac(current_index)
+                    return True # Olayın işlendiğini ve Qt'nin varsayılan diğer işlerini yapmamasını söyle
+                    
+        # Diğer tüm standart olayları (ok tuşları, tıklamalar vb.) normal seyrine bırak
+        return super().eventFilter(source, event)
+                                
+
+    def onizleme_goster(self, file_path):
+        """ FreeCAD dosyasının içindeki Thumbnail.png'yi ayıklar ve lblOnizleme'ye basar """
+        try:
+            import zipfile
+            
+            with zipfile.ZipFile(file_path, 'r') as archive:
+                # FreeCAD önizleme resminin standart yolu  
+                thumbnail_path = 'thumbnails/Thumbnail.png'              
+                
+                if thumbnail_path in archive.namelist():
+                    # Resmi hafızaya (byte olarak) oku
+                    img_data = archive.read(thumbnail_path)
+                    
+                    # QByteArray ve QPixmap kullanarak resmi yükle
+                    q_byte_array = QtCore.QByteArray(img_data)
+                    pixmap = QtGui.QPixmap()
+                    pixmap.loadFromData(q_byte_array, "PNG")
+                    
+                    # QLabel boyutuna göre resmi orantılı ölçeklendir (Boşluk kalmasın, bozulmasın)
+                    en_boy_orani = QtCore.Qt.KeepAspectRatio
+                    yumusak_gecis = QtCore.Qt.SmoothTransformation
+                    
+                    lbl_size = self.window.lblOnizleme.size()
+                    olcekli_pixmap = pixmap.scaled(lbl_size, en_boy_orani, yumusak_gecis)
+                    
+                    # Resmi QLabel'e yerleştir ve ortala
+                    self.window.lblOnizleme.setPixmap(olcekli_pixmap)
+                    self.window.lblOnizleme.setAlignment(QtCore.Qt.AlignCenter)
+                else:
+                    # Eğer dosyada önizleme resmi yoksa (bazen boş dosyalarda olmaz)
+                    self.window.lblOnizleme.setText("Önizleme Yok")
+                    
+        except Exception as e:
+            self.window.lblOnizleme.setText(f"Resim Yüklenemedi")
+            print(f"Önizleme hatası: {str(e)}")
+
+    def klasor_listele(self):
+        # Metin kutusundan seçili yolu al
+        klasor_yolu = self.window.lEKlasor.text()
+        
+        # Yol geçerli mi kontrol et
+        if not klasor_yolu or not os.path.exists(klasor_yolu):
+            QtWidgets.QMessageBox.warning(self.window, "Hata", "Lütfen önce geçerli bir klasör seçin!")
+            return
+        # --- RADIO BUTON KONTROLÜ BURADA BAŞLIYOR ---
+        # Arayüzdeki radio butonların durumunu yakala
+        Sadece_parca_goster = self.window.radioParca.isChecked()
+        Sadece_montaj_goster = self.window.radioMontaj.isChecked()
+        Hepsini_goster = self.window.radioHepsi.isChecked()
+        
+        # --- ÖNEMLİ: YÜKLEME ESNASINDA SIRALAMAYI DEVRE DIŞI BIRAK ---
+        # Bu sayede veriler eklenirken tablo kilitlenmez ve sıralama şaşmaz
+        self.window.tableViewListe.setSortingEnabled(False)
+        
+        
+        # --- RADIO BUTON KONTROLÜ BİTTİ ---
+            
+        # Tabloyu temizle (Başlıklar kalır, veriler sıfırlanır)
+        self.tablo_model.removeRows(0, self.tablo_model.rowCount())
+        # Eski önizleme yazısını/resmini temizle
+        if hasattr(self.window, 'lblOnizleme'):
+            self.window.lblOnizleme.clear()
+            self.window.lblOnizleme.setText("Seçim bekleniyor...")
+        
+        try:
+            # Klasördeki dosyaları oku
+            dosyalar = os.listdir(klasor_yolu)
+            
+            for dosya in dosyalar:
+                # Sadece FreeCAD dosyalarını (.FCStd) listele (Hepsini istersen bu if şartını kaldırabilirsin)
+                if dosya.endswith('.FCStd'):
+                    tam_yol = os.path.join(klasor_yolu, dosya)
+                    
+                    
+                    if not Hepsini_goster:                    
+                    
+                        tip, analiz = self.analiz_et_freecad_dosyasi(tam_yol)
+                        
+                        # --- FİLTRELEME MANTIĞI ---
+                        # Eğer analiz sonucu "Tekil Parça" ise ve kullanıcı Montaj seçtiyse bu dosyayı atla
+                        if Sadece_montaj_goster and tip == "Parca":
+                            continue
+                        
+                        # Eğer analiz sonucu Montaj içeriyorsa ve kullanıcı Parça seçtiyse bu dosyayı atla
+                        if Sadece_parca_goster and tip == "Montaj":
+                            continue
+                        # --------------------------
+                    
+                    
+                        print(f"{tip}  -  {analiz}")
+                    
+                    
+                    #durum, mesaj = self.is_assembly_file(tam_yol)
+                    #print(f"Dosya Durumu: {mesaj}")
+                    
+                    # Dosya bilgilerini (istatistiklerini) al
+                    istatistik = os.stat(tam_yol)
+                    
+                    # 1. Dosya Boyutu Formatlama (KB cinsinden)
+                    #boyut_kb = f"{istatistik.st_size / 1024:.2f} KB"
+                    boyut_kb = f"{istatistik.st_size / 1024:.2f} KB " # Sonuna bir adet boşluk bıraktık
+                    
+                    # --- LINUX İÇİN OLUŞTURMA TARİHİ GÜNCELLEMESİ ---
+                    # Eğer sistem destekliyorsa st_birthtime kullanır, yoksa en güvenli geçmiş zamanı seçer
+                    try:
+                        gercek_olusturma = istatistik.st_birthtime
+                    except AttributeError:
+                        # Eğer st_birthtime yoksa, st_mtime ve st_ctime arasından EN ESKİ olanı doğum tarihi kabul et
+                        gercek_olusturma = min(istatistik.st_mtime, istatistik.st_ctime)
+                    
+                    # 2. Zaman Bilgilerini Okunabilir Yapma (GG.AA.YYYY SS:DD:SS)
+                    olusturma_zamani = time.strftime('%d.%m.%Y %H:%M:%S', time.localtime(gercek_olusturma))
+                    degisme_zamani = time.strftime('%d.%m.%Y %H:%M:%S', time.localtime(istatistik.st_mtime))
+                    
+                    # Tablo için satır elementlerini oluştur (StandardItem)
+                    item_ad = QtGui.QStandardItem(dosya)
+                    item_boyut = QtGui.QStandardItem(boyut_kb)
+                    item_boyut.setData(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, QtCore.Qt.TextAlignmentRole)
+                    item_olusturma = QtGui.QStandardItem(olusturma_zamani)
+                    item_degisme = QtGui.QStandardItem(degisme_zamani)
+                    
+                    # Hücreleri düzenlenemez (Read-Only) yapalım
+                    item_ad.setEditable(False)
+                    item_boyut.setEditable(False)
+                    item_olusturma.setEditable(False)
+                    item_degisme.setEditable(False)
+                    
+                    # Satırı modele ekle
+                    self.tablo_model.appendRow([item_ad, item_boyut, item_olusturma, item_degisme])
+                    
+            Console.PrintMessage("Klasör içeriği güncellendi.\n")
+            # --- ÖNEMLİ: YÜKLEME BİTTİKTEN SONRA SIRALAMAYI AÇ VE TETİKLE ---
+            self.window.tableViewListe.setSortingEnabled(True)
+            # 0. sütuna (Dosya Adı) göre Küçükten Büyüğe (Ascending) sırala
+            # Eğer büyükten küçüğe istersen: QtCore.Qt.DescendingOrder yapabilirsin
+            self.window.tableViewListe.sortByColumn(0, QtCore.Qt.AscendingOrder)
+            
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self.window, "Hata", f"Klasör okunurken hata oluştu:\n{str(e)}")
+
+    def __del__(self):
+        try:
+            Gui.Selection.removeObserver(self)
+        except:
+            pass 
+
+# Arayüzü çalıştır
+pencere = KlasorSeciciArayuz()
