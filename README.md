@@ -1,4 +1,4 @@
-This macro written incase of find and see the part or assembly files more easily.
+This macro written incase of find and see the part or assembly files more easily in FreeCAD.
 I needed this while creating big assembly here: https://youtu.be/Pww76NPr6M8?si=cOHvuqOpyoPSeXO2
 Please do not forget to change UI file location!!! 
 Writer: Dr.Mucibirahman İLBUĞA
